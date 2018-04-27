@@ -12,5 +12,5 @@ typedef struct LZWDictEntry {
     int length;             // Length of the string of characters in bytes, does not include any null terminator 
 } LZWDictEntry_t;
 
-// Decompress an input file to an output file
-void decompress(FILE* , FILE*);
+// Decompress an input file to an output file returns 1 if successful, 0 if not
+int decompress(FILE* , FILE*);

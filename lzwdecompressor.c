@@ -4,7 +4,7 @@
 #include "lzwdecompressor.h"
 
 // Get the next 12 bit code from the input file
-// Supplied with a pointer to a LZWFile struct to wrap the file pointer together with state
+// Supplied with a pointer to a LZWFile struct to wrap the file pointer together with read state
 // Returns a valid code between 0 - 4095 or 4096 if no code 
 static uint16_t getNextCode(LZWFile_t *input) {
     uint16_t code;
@@ -29,14 +29,13 @@ static uint16_t getNextCode(LZWFile_t *input) {
         if (ftell(input->fp) == input->length) {
             // If so - account for padding of 12 to 16 bits, can just shift first byte right by 8 because first 4 bits already zero 
             code = (bytes[0] << 8) | bytes[1];
-            fprintf(stdout, "End of file, byte[0]: %d byte[1]: %d code: %d\n", bytes[0], bytes[1], code);
         } else {
             // Code is the first byte left shifted 4 OR'd with second byte right shifted 4
             code = (bytes[0] << 4) | (bytes[1] >> 4);
 
             // Save last 4 bits of second byte in the input struct to make next code
             input->bitsleftover = 1;
-            input->bits = bytes[1] & 0b00001111;
+            input->bits = bytes[1] & 0x0F;
         }
     }
     return code;
@@ -53,17 +52,22 @@ static void resetDictionary(LZWDictEntry_t *dict, int start, int len) {
 }
 
 // Decompress a LZW compressed file
-// Takes an compressed input file and a file to output to 
-void decompress(FILE *inputfile, FILE *outputfile) {
+// Takes an compressed input file and a file to output to
+// Returns 1 if successful and 0 if not 
+int decompress(FILE *inputfile, FILE *outputfile) {
     uint16_t prevcode;                                          // The last code read from the compressed input file 
     uint16_t currcode;                                          // The current code read from the compressed input file
     int dictIndex = 0;                                          // The next free index in the dictionary to put new entries 
     LZWDictEntry_t dictionary[4096];                            // Dictionary of 4096 string entries and their lengths - 12 bits can only address up to 4095
+    int success = 0;
 
-    
 
     // Open supplied input file and initialise LZWFile_t structure
     LZWFile_t *input = malloc(sizeof(LZWFile_t));
+    if (input == NULL) {
+        perror("LZWFile_t malloc failed: ");
+        goto cleanExit;
+    }
     memset(input, 0, sizeof(LZWFile_t));
     input->bitsleftover = 0;
     input->fp = inputfile;
@@ -71,16 +75,19 @@ void decompress(FILE *inputfile, FILE *outputfile) {
     if (fseek(input->fp,0,SEEK_END) == 0) {
         input->length = ftell(input->fp);
         rewind(input->fp);
-        fprintf(stdout, "File is %lu bytes long\n", input->length);
     } else {
-        fprintf(stderr, "Could not find end of file\n");
-        return;
+        perror("Could not find end of file: ");
+        goto cleanExit;
     }
 
     // Initialise dictionary with ASCII entries from 0 to 255
     memset(dictionary, 0, sizeof(LZWDictEntry_t) * 4096);
     for (dictIndex = 0; dictIndex<256; dictIndex++) {
         dictionary[dictIndex].entry = malloc(sizeof(unsigned char));
+        if (dictionary[dictIndex].entry == NULL) {
+            perror("Char malloc failed: ");
+            goto cleanExit;
+        }
         *(dictionary[dictIndex].entry) = dictIndex;
         dictionary[dictIndex].length = 1;
     }
@@ -88,32 +95,32 @@ void decompress(FILE *inputfile, FILE *outputfile) {
     // Get the first code from compressed input, check it is valid and then output it
     if ((prevcode = getNextCode(input)) >= dictIndex) {
         fprintf(stderr, "First code not in dictionary\n");
-        resetDictionary(dictionary, 0, dictIndex); // Free used dictionary entries because exiting
-        free(input);
-        return;
+        goto cleanExit;
     }
     fwrite(dictionary[prevcode].entry, sizeof(unsigned char), dictionary[prevcode].length, outputfile);
     while ((currcode = getNextCode(input)) < 4096) {
 
         if (currcode > dictIndex) {
             fprintf(stderr, "Code out of range of dictionary\n");
-            resetDictionary(dictionary, 0, dictIndex); // Free used dictionary entries because exiting
-            free(input);
-            return;
+            goto cleanExit;
         }
 
         // Initialise new dictionary entry 
         dictionary[dictIndex].length = dictionary[prevcode].length + 1;
         dictionary[dictIndex].entry = malloc(dictionary[dictIndex].length * sizeof(unsigned char));
+        if (dictionary[dictIndex].entry == NULL) {
+            perror("Char malloc failed: ");
+            goto cleanExit;
+        }
         memset(dictionary[dictIndex].entry, 0, dictionary[dictIndex].length * sizeof(unsigned char));
 
         if (currcode >= dictIndex) {
             // The current code is the one that is about to be created this iteration but is not available in dictionary yet,
-            // so take first character from previous output
+            // so take first character from previous output as described by https://en.wikipedia.org/wiki/Lempel–Ziv–Welch#Decoding
             memcpy(dictionary[dictIndex].entry, dictionary[prevcode].entry, dictionary[prevcode].length);
             memcpy(dictionary[dictIndex].entry + dictionary[prevcode].length, dictionary[prevcode].entry, 1);
         } else {
-            // Take first char from current code that is already in the dictionary
+            // Append first char from current code entry that is already in the dictionary to the previous code entry
             memcpy(dictionary[dictIndex].entry, dictionary[prevcode].entry, dictionary[prevcode].length);
             memcpy(dictionary[dictIndex].entry + dictionary[prevcode].length, dictionary[currcode].entry, 1);
         }
@@ -130,10 +137,13 @@ void decompress(FILE *inputfile, FILE *outputfile) {
         prevcode = currcode;
     }
 
-    fprintf(stdout, "Last char: %d %s\n", prevcode, dictionary[prevcode].entry);
+    // Reached this point so file has been successfully decompressed
+    success = 1;
 
-    resetDictionary(dictionary, 0, 4096); // Free whole dictionary because exiting
-    free(input);
+cleanExit:
+    resetDictionary(dictionary, 0, dictIndex);
+    if (input != NULL) free(input);
+    return success;
 }
 
 int main(int argc, const char * argv[]) {
