@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <memory.h>
+#include <stdint.h>
 #include "lzwdecompressor.h"
 
 // Get the next 12 bit code from the input file
